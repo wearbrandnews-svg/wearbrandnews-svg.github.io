@@ -4,6 +4,8 @@
   "main": "src/index.js",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // 実行ログ（Cloudflareダッシュボードの Workers → ai-knowledge-mcp → ログ）。無料枠内
+  "observability": { "enabled": true },
   "kv_namespaces": [
     // `npx wrangler kv namespace create OAUTH_KV` で表示された id に置き換える
     { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
