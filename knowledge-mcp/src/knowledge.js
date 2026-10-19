@@ -177,7 +177,19 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
     [P.after]: await sha256(change.text),
     [P.backup]: backup.id,
   });
-  const saved = await drive.download(file_id);
+  // Confirm a stable snapshot after upload. An upload response is not a stable
+  // read snapshot: Drive versions can change even when the body is unchanged.
+  // Check the current body and request markers between two metadata reads.
+  let saved, verifiedMeta, verified = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const verifyBefore = await drive.getMeta(file_id, META_FIELDS);
+    saved = await drive.download(file_id);
+    verifiedMeta = await drive.getMeta(file_id, META_FIELDS);
+    if (verifyBefore.version === verifiedMeta.version && verifyBefore.modifiedTime === verifiedMeta.modifiedTime && !checkTarget(verifiedMeta, config)) {
+      verified = true;
+      break;
+    }
+  }
   if (saved !== change.text) {
     return result('verification_failed', {
       file_id,
@@ -189,8 +201,7 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
     });
   }
 
-  const verifiedMeta = await drive.getMeta(file_id, META_FIELDS);
-  if (verifiedMeta.version !== updated.version || verifiedMeta.appProperties?.[P.request] !== requestHash || verifiedMeta.appProperties?.[P.input] !== inputHash) {
+  if (!verified || verifiedMeta.appProperties?.[P.request] !== requestHash || verifiedMeta.appProperties?.[P.input] !== inputHash) {
     return result('verification_failed', { file_id, backup_file_id: backup.id, modified_time: verifiedMeta.modifiedTime, message: '保存後に版または依頼記録が変わりました。本文を再確認してください' });
   }
 

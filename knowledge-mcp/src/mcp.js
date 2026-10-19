@@ -2,7 +2,7 @@
 import { listKnowledge, readKnowledge, safeUpdate, checkKnowledge, searchKnowledge } from './knowledge.js';
 
 const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'ai-knowledge', version: '1.2.0' };
+const SERVER_INFO = { name: 'ai-knowledge', version: '1.2.1' };
 
 const UPDATE_DESCRIPTION = `AI-Knowledgeフォルダー直下の既存Markdown（共通知識DB）を安全に更新する（Safe Update Shared Knowledge）。
 保存前にread_shared_knowledgeで最新本文とmodified_timeを取得し、そのmodified_timeをexpected_modified_timeにそのまま渡す。request_idは依頼ごとにAIが生成する一意の文字列。

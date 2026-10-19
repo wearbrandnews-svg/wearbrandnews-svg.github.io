@@ -388,3 +388,22 @@ test('no-match search preserves the distinction between not found and not existi
   assert.deepEqual(out.matches, []);
   assert.ok(out.message.includes('存在しないとは断定せず'));
 });
+
+test('stable post-upload body is accepted when upload response metadata lags', async () => {
+  const { drive, file } = setup();
+  const upload = drive.uploadContent;
+  drive.uploadContent = async (...args) => { const out = await upload(...args); return { ...out, version: 'older-response' }; };
+  const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'lagged-response', mode: 'full', content: 'new body' });
+  assert.equal(out.status, 'saved');
+  assert.equal(out.match, true);
+});
+
+test('post-upload external edit is preserved and not reported as a verified save', async () => {
+  const { drive, file } = setup();
+  const getMeta = drive.getMeta;
+  let reads = 0;
+  drive.getMeta = async (...args) => { if (++reads === 5) await drive.uploadContent('T', 'external edit'); return getMeta(...args); };
+  const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'external-after-save', mode: 'full', content: 'my update' });
+  assert.equal(out.status, 'verification_failed');
+  assert.equal(file.body, 'external edit');
+});
