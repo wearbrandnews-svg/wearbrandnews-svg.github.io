@@ -4,6 +4,7 @@
 // Drive の操作は drive オブジェクト（src/drive.js）経由で行い、テストでは偽物に差し替える。
 
 import { inspectMarkdown, inspectKnowledge, selectMarkdown } from './markdown.js';
+import { searchMarkdown, routeFiles } from './search.js';
 
 export const KEEP_GENERATIONS = 20;
 const MODES = ['full', 'append', 'replace_exact'];
@@ -236,6 +237,7 @@ export async function pruneBackups(drive, config, name) {
 export async function readKnowledge(drive, config, input) {
   const fileId = input?.file_id;
   if (typeof fileId !== 'string' || !fileId) return { status: 'invalid_request', message: 'file_idが必要です' };
+  if (input.query !== undefined && (typeof input.query !== 'string' || !input.query.trim() || input.query.length > 200 || input.section !== undefined || input.product_ids !== undefined || (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 8)))) return { status: 'invalid_request', file_id: fileId, message: 'queryは1〜200文字、limitは1〜8です。section・product_idsと併用できません' };
   let meta, content, stable = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     meta = await drive.getMeta(fileId, META_FIELDS);
@@ -246,6 +248,11 @@ export async function readKnowledge(drive, config, input) {
     if (!checkTarget(after, config) && after.version === meta.version && after.modifiedTime === meta.modifiedTime) { stable = true; break; }
   }
   if (!stable) return { status: 'conflict', file_id: fileId, message: '読み取り中に変更が続いています。少し後に取得してください' };
+  if (input.query !== undefined) {
+    const matches = searchMarkdown(content, meta.name, input.query, input.limit ?? 5);
+    const excerpt = matches.map(m => `## ${m.section}\n${m.source_notes ? m.source_notes + '\n' : ''}${m.text}`).join('\n\n');
+    return { status: 'ok', file_id: fileId, name: meta.name, modified_time: meta.modifiedTime, complete: false, evidence_only: true, query: input.query, matches, content: excerpt, length: excerpt.length, total_length: content.length, message: matches.length ? '関連箇所の候補であり網羅的な一覧や検証済みの回答ではありません。全体を列挙する質問では見出しの内容も取得してください。保存前は選択なしで全文を取得してください' : '一致なし。情報が存在しないとは断定せず、見出しや全文で確認してください' };
+  }
   const selected = selectMarkdown(content, input);
   if (selected.error) return { status: 'invalid_request', file_id: fileId, message: selected.error };
   return {
@@ -290,4 +297,22 @@ export async function checkKnowledge(drive, config) {
     files.push(read);
   }
   return { status: 'ok', ...inspectKnowledge(files), semantic_verification: false };
+}
+
+export async function searchKnowledge(drive, config, input) {
+  if (typeof input?.query !== 'string' || !input.query.trim() || input.query.length > 200 || (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 8))) return { status: 'invalid_request', message: 'queryは1〜200文字、limitは1〜8です' };
+  if (input.file_ids !== undefined && (!Array.isArray(input.file_ids) || !input.file_ids.length || input.file_ids.length > 8 || input.file_ids.some(id => typeof id !== 'string' || !id))) return { status: 'invalid_request', message: 'file_idsは1〜8件のファイルIDです' };
+  const listed = await listKnowledge(drive, config);
+  const files = listed.files.filter(file => file.name !== 'knowledge-update-test.md');
+  const candidates = input.file_ids ? files.filter(file => input.file_ids.includes(file.file_id)) : routeFiles(files, input.query);
+  if (input.file_ids && new Set(input.file_ids).size !== candidates.length) return { status: 'invalid_request', message: '対象外または存在しないfile_idsがあります' };
+  if (!candidates.length) return { status: 'ok', complete: false, evidence_only: true, matches: [], files_read: [], needs_scope: true, message: '対象分野を判断できません。file_idsで対象を指定するか、質問に分野名を加えてください' };
+  const matches = [], filesRead = [];
+  for (const file of candidates) {
+    const read = await readKnowledge(drive, config, { file_id: file.file_id, query: input.query, limit: input.limit ?? 5 });
+    if (read.status !== 'ok') return read;
+    filesRead.push({ file_id: file.file_id, name: file.name, modified_time: read.modified_time });
+    matches.push(...read.matches.map(m => ({ ...m, file_id: file.file_id, modified_time: read.modified_time })));
+  }
+  return { status: 'ok', query: input.query, complete: false, evidence_only: true, matches: matches.sort((a, b) => b.score - a.score).slice(0, input.limit ?? 5), files_read: filesRead, needs_scope: false, message: '関連箇所の候補であり網羅的な一覧ではありません。全体を列挙するときは見出しの内容も取得し、時系列・確認範囲・現在の本人指示と照合してください。検索本文をfull保存に使わないでください' };
 }

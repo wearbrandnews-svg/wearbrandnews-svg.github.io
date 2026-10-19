@@ -1,8 +1,8 @@
 // MCP（Streamable HTTP、ステートレス・JSON応答）の最小実装。
-import { listKnowledge, readKnowledge, safeUpdate, checkKnowledge } from './knowledge.js';
+import { listKnowledge, readKnowledge, safeUpdate, checkKnowledge, searchKnowledge } from './knowledge.js';
 
 const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'ai-knowledge', version: '1.1.0' };
+const SERVER_INFO = { name: 'ai-knowledge', version: '1.2.0' };
 
 const UPDATE_DESCRIPTION = `AI-Knowledgeフォルダー直下の既存Markdown（共通知識DB）を安全に更新する（Safe Update Shared Knowledge）。
 保存前にread_shared_knowledgeで最新本文とmodified_timeを取得し、そのmodified_timeをexpected_modified_timeにそのまま渡す。request_idは依頼ごとにAIが生成する一意の文字列。
@@ -26,11 +26,19 @@ const TOOLS = [
       properties: {
         file_id: { type: 'string', description: '対象MDのDriveファイルID' },
         section: { type: 'string', description: '取得する見出し名（#を除く完全一致）。下位見出しも含む' },
+        query: { type: 'string', maxLength: 200, description: 'このファイル内を自然な語句で検索する。section・product_idsと併用不可' },
+        limit: { type: 'integer', minimum: 1, maximum: 8, description: 'query検索で返す最大件数。既定5件' },
         product_ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50, description: '取得する商品ID。表の列見出しも含める。sectionと併用不可' },
       },
       required: ['file_id'],
       additionalProperties: false,
     },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'search_shared_knowledge',
+    description: '本人の情報が必要な相談で、自然な語句から関連分野を選んで検索。商品・使い方の根拠を確認日・見出し・行番号と返す。分野不明なら全件を無条件に読まずneeds_scope=trueを返す。AIの回答や事実検証ではなく、結果はfull保存に使えない。一般的な質問だけでは実行しない。',
+    inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 200 }, file_ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 }, limit: { type: 'integer', minimum: 1, maximum: 8 } }, required: ['query'], additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
   {
@@ -65,6 +73,7 @@ const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id: id ?? null, error
 async function callTool(name, args, deps) {
   if (name === 'list_shared_knowledge') return listKnowledge(deps.drive, deps.config);
   if (name === 'read_shared_knowledge') return readKnowledge(deps.drive, deps.config, args);
+  if (name === 'search_shared_knowledge') return searchKnowledge(deps.drive, deps.config, args);
   if (name === 'check_shared_knowledge') return checkKnowledge(deps.drive, deps.config);
   if (name === 'safe_update_shared_knowledge') return deps.update ? deps.update(args) : safeUpdate(deps.drive, deps.config, args);
   return null;

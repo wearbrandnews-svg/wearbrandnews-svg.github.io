@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pruneBackups, readKnowledge, safeUpdate, tokyoStamp } from '../src/knowledge.js';
+import { pruneBackups, readKnowledge, safeUpdate, tokyoStamp, searchKnowledge } from '../src/knowledge.js';
+import { searchMarkdown, routeFiles } from '../src/search.js';
 import { handleMcp } from '../src/mcp.js';
 import { inspectKnowledge, selectMarkdown } from '../src/markdown.js';
 import { SerialQueue } from '../src/coordinator.js';
@@ -206,7 +207,7 @@ test('MCP handshake, tool list and tool call', async () => {
   assert.equal(res.status, 202);
   res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = (await res.json()).result.tools.map((t) => t.name);
-  assert.deepEqual(names, ['list_shared_knowledge', 'read_shared_knowledge', 'check_shared_knowledge', 'safe_update_shared_knowledge']);
+  assert.deepEqual(names, ['list_shared_knowledge', 'read_shared_knowledge', 'search_shared_knowledge', 'check_shared_knowledge', 'safe_update_shared_knowledge']);
   res = await post({
     jsonrpc: '2.0', id: 3, method: 'tools/call',
     params: { name: 'safe_update_shared_knowledge', arguments: { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'r', mode: 'append', content: 'z' } },
@@ -315,4 +316,75 @@ test('multipart upload carries exact UTF-8 content and retry markers in one PATC
   const wire = new TextDecoder().decode(requests[0].init.body);
   assert.ok(wire.includes(body));
   assert.ok(wire.includes('"kmReq":"request-hash"'));
+});
+
+test('search routes supplement questions only to relevant domains', () => {
+  const files = ['products.md', 'health-training.md', 'smart-home.md', 'AI-Rules.md'].map(name => ({ name }));
+  assert.deepEqual(routeFiles(files, '昼ご飯の前に飲むサプリ'), files.slice(0, 2));
+});
+
+test('unknown search scope reads no personal file bodies', async () => {
+  const { drive } = setup();
+  const out = await searchKnowledge(drive, config, { query: 'あれはどう？' });
+  assert.equal(out.needs_scope, true);
+  assert.equal(drive.calls.filter(c => c[0] === 'download').length, 0);
+});
+
+test('search prioritizes a product definition over historical mentions', () => {
+  const text = '# Products\n## Items\n| ID | Name | State |\n|---|---|---|\n| GEAR-001 | Shoe X | 購入予定 |\n## 更新履歴\n- GEAR-001の購入予定を記録\n';
+  const result = searchMarkdown(text, 'products.md', '今のGEAR-001は？');
+  assert.ok(result[0].text.includes('| GEAR-001 |'));
+  assert.equal(result[0].history, false);
+});
+
+test('search maps Japanese hour expressions and includes table headers', () => {
+  const text = '# 習慣\n## 時刻\n| 時刻 | 行動 |\n|---|---|\n| 11:00 | 昼食1時間前 |\n| 19:00 | 夕食 |\n';
+  const result = searchMarkdown(text, 'health-training.md', '11時は昼ご飯の何分前？');
+  assert.ok(result[0].text.includes('11:00'));
+  assert.ok(result[0].text.includes('| 時刻 | 行動 |'));
+});
+
+test('search keeps the section provenance with a product row', () => {
+  const text = '# Products\n## Items\n2026-10-20、本人提示資料で確認。現品未確認。\n\n| ID | Name |\n|---|---|\n| DEV-001 | Device X |\n';
+  const result = searchMarkdown(text, 'products.md', 'DEV-001');
+  assert.ok(result[0].source_notes.includes('現品未確認'));
+  assert.ok(result[0].line_start > 0);
+});
+
+test('search does not expose fenced examples as evidence', () => {
+  const text = '# Test\n```\n秘密の語句\n```\n通常の説明\n';
+  assert.equal(searchMarkdown(text, 'test.md', '秘密の語句').length, 0);
+});
+
+test('file search is partial and cannot be combined with section selection', async () => {
+  const { drive } = setup('# Memo\n## A\nサプリの時刻は未確認\n');
+  let out = await readKnowledge(drive, config, { file_id: 'T', query: 'サプリ' });
+  assert.equal(out.complete, false);
+  assert.equal(out.evidence_only, true);
+  out = await readKnowledge(drive, config, { file_id: 'T', query: 'サプリ', section: 'A' });
+  assert.equal(out.status, 'invalid_request');
+});
+
+test('cross-file search respects explicit scope and excludes test files', async () => {
+  const drive = fakeDrive({ P: { name: 'products.md', body: '# P\nサプリの製品情報\n' }, H: { name: 'health-training.md', body: '# H\nサプリの使い方\n' }, T: { name: 'knowledge-update-test.md', body: '# Test\nサプリの試験\n' } });
+  const out = await searchKnowledge(drive, config, { query: 'サプリ', file_ids: ['H'] });
+  assert.deepEqual(out.files_read.map(f => f.file_id), ['H']);
+  const invalid = await searchKnowledge(drive, config, { query: 'サプリ', file_ids: ['T'] });
+  assert.equal(invalid.status, 'invalid_request');
+});
+
+test('search rejects oversized queries and non-integer limits before reads', async () => {
+  const { drive } = setup();
+  for (const args of [{ query: '' }, { query: 'x'.repeat(201) }, { query: '薬', limit: 1.5 }]) {
+    assert.equal((await searchKnowledge(drive, config, args)).status, 'invalid_request');
+  }
+  assert.equal(drive.calls.length, 0);
+});
+
+test('no-match search preserves the distinction between not found and not existing', async () => {
+  const { drive } = setup('# Memo\n既知の情報\n');
+  const out = await readKnowledge(drive, config, { file_id: 'T', query: 'zzzzunique' });
+  assert.equal(out.status, 'ok');
+  assert.deepEqual(out.matches, []);
+  assert.ok(out.message.includes('存在しないとは断定せず'));
 });

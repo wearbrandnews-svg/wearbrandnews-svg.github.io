@@ -96,3 +96,12 @@ npm run deploy
 - 本文と再送判定用appPropertiesを1回のDrive multipart PATCHで送ります。応答や照合が途中で失われた場合も、同じ依頼をそのまま再送して判定できます。全文照合と記録の確認を終えた場合だけ成功を返します。
 - Google Drive APIの仕様：https://developers.google.com/workspace/drive/api/guides/manage-uploads
 - Durable Objectsの無料枠：https://developers.cloudflare.com/durable-objects/platform/pricing/
+
+## 1.2.0の追加機能（外部の有料APIを使わない検索）
+
+- `search_shared_knowledge({query, file_ids?, limit?})`は、質問の分野に応じて対象ファイルを絞り、語句・別名・見出しで検索します。対象不明なら全件を無条件に読まず`needs_scope=true`を返します。明示的な`file_ids`指定も可能です。専用テストMDは対象外です。
+- `read_shared_knowledge({file_id, query, limit?})`で1ファイル内だけの検索もできます。`section`・`product_ids`とは併用できません。
+- 結果は原文の抜粋、見出し、行番号、版の時刻、取得できた確認範囲とともに返します。順位は語句の関連性です。真偽判定・医学的判断・網羅的な一覧ではありません。結果がないことも、情報がない証拠にはなりません。
+- 検索は関連箇所を見つける入口です。全件列挙・成分の合計・根拠の確認には、該当する見出し等を追加取得してください。検索結果は`complete=false`であり、全文保存の元には使えません。
+- 外部のモデルAPI・埋め込みAPI・有料サービス・新しい保存領域・定期タスクは追加していません。既存のCloudflare無料枠・Drive APIを使用し、無料枠を超えれば停止し得ます。
+- 公開用の匿名データで自動試験31件。本人データを使う検索評価は公開リポジトリへ置かず、回答モデルの正答率と分けて扱います。
