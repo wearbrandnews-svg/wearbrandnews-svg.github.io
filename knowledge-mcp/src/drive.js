@@ -39,12 +39,15 @@ export function createDrive(getToken, fetchImpl = fetch) {
       return new TextDecoder('utf-8').decode(await response.arrayBuffer());
     },
 
-    uploadContent: (id, text) =>
-      json(`${UPLOAD}/${encodeURIComponent(id)}?uploadType=media&fields=id,modifiedTime`, {
+    uploadContent: (id, text, appProperties) => {
+      const boundary = `knowledge_${crypto.randomUUID()}`;
+      const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ appProperties })}\r\n--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${text}\r\n--${boundary}--\r\n`;
+      return json(`${UPLOAD}/${encodeURIComponent(id)}?uploadType=multipart&fields=id,modifiedTime,version`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'text/markdown; charset=UTF-8' },
-        body: new TextEncoder().encode(text),
-      }),
+        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body: new TextEncoder().encode(body),
+      });
+    },
 
     setAppProperties: (id, appProperties) =>
       json(`${API}/${encodeURIComponent(id)}?fields=id,modifiedTime`, jsonInit('PATCH', { appProperties })),
@@ -52,13 +55,14 @@ export function createDrive(getToken, fetchImpl = fetch) {
     copy: (id, name, parentId) =>
       json(`${API}/${encodeURIComponent(id)}/copy?fields=id,name`, jsonInit('POST', { name, parents: [parentId] })),
 
-    list: (q, orderBy = 'createdTime desc') => {
+    list: (q, orderBy = 'createdTime desc', pageToken) => {
       const params = new URLSearchParams({
         q,
         orderBy,
         pageSize: '1000',
         fields: 'nextPageToken,files(id,name,createdTime,modifiedTime,mimeType)',
       });
+      if (pageToken) params.set('pageToken', pageToken);
       return json(`${API}?${params}`);
     },
 

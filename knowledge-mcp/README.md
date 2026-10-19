@@ -16,7 +16,7 @@ Make の「Safe Update Shared Knowledge」（シナリオ 8027652）と MCP ツ�
 | バックアップの 20 世代管理（21 世代目以降をゴミ箱へ、次ページがあれば整理しない） | 同じ |
 | — | **追加**：`read_shared_knowledge`（エスケープなしの生の本文と modified_time を返す）、`list_shared_knowledge`（ファイル一覧） |
 
-費用はかかりません（Cloudflare Workers・KV の無料枠と Google Drive API だけを使います）。
+Cloudflare Workers・KV・SQLite版Durable Objectsの無料枠とGoogle Drive APIを使います。無料枠を超えた場合の停止はあり、無制限ではありません。
 
 接続できるのは `ALLOWED_EMAIL` に設定した Google アカウントでログインした場合だけです。
 
@@ -82,6 +82,17 @@ npm run deploy
 ```
 
 ## 制約
-- 版の確認と書き込みは原子的ではありません（Make 版と同じ）。Obsidian などからの同時編集は避けてください
+- このMCPから同じファイルへの保存はファイルごとのDurable Objectで直列化します。Obsidian等の直接編集にはこの制御が働かず、Driveの版確認と書込み自体も原子的ではありません。直接編集との同時保存は避けてください
 - 再送防止の記録は直近の 1 件だけです（Make 版と同じ）
 - Workers の無料枠では、1 リクエストあたりの CPU 時間が 10 ミリ秒までです。Drive の応答を待つ時間は含まれませんが、大きな本文で上限に当たった場合は Cloudflare のログに表示されます
+
+## 1.1.0の追加機能
+
+- `read_shared_knowledge`に`section`（見出し名の完全一致）または`product_ids`（商品ID配列）を指定すると必要部分を返します。選択は併用できません。`complete=false`は部分本文です。全文保存の元には使わず、保存直前に選択なしで再取得してください。選択は返却量を減らすもので、Driveからの取得は全文です。
+- 読取り前後で版を照合し、不整合なスナップショットは再取得します。変更が続く場合は競合として返します。
+- `check_shared_knowledge`で表の列数、分離した商品行、商品ID重複、参照切れを点検します。専用テストMDを除外します。意味の矛盾や出典の正しさを保証しません。
+- 保存時には新しく発生する構造の問題を拒否します。既存の問題を直す変更は妨げません。欠落IDの全ファイル横断検査は明示的な点検ツールで実行します。
+- 保存はファイルごとの`KnowledgeCoordinator`で直列化します。処理が失敗しても次の保存を止めません。Durable ObjectsはSQLite版を使用し、名前空間を増やす変更は設定ファイルで管理します。
+- 本文と再送判定用appPropertiesを1回のDrive multipart PATCHで送ります。応答や照合が途中で失われた場合も、同じ依頼をそのまま再送して判定できます。全文照合と記録の確認を終えた場合だけ成功を返します。
+- Google Drive APIの仕様：https://developers.google.com/workspace/drive/api/guides/manage-uploads
+- Durable Objectsの無料枠：https://developers.cloudflare.com/durable-objects/platform/pricing/

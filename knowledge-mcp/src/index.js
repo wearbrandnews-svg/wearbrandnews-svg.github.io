@@ -5,6 +5,28 @@ import { AuthorizationError, CimdFetchError, OAuthProvider, authorizationErrorRe
 import { createDrive } from './drive.js';
 import { exchangeGoogleCode, getDriveToken, googleAuthorizeUrl, pkceChallenge } from './google.js';
 import { handleMcp } from './mcp.js';
+import { safeUpdate } from './knowledge.js';
+import { SerialQueue } from './coordinator.js';
+
+export class KnowledgeCoordinator {
+  constructor(state, env) {
+    this.env = env;
+    this.queue = new SerialQueue();
+  }
+  async fetch(request) {
+    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    const input = await request.json();
+    return this.queue.run(async () => {
+      try {
+        const drive = createDrive(force => getDriveToken(this.env, force));
+        const config = { knowledgeFolderId: this.env.KNOWLEDGE_FOLDER_ID, backupFolderId: this.env.BACKUP_FOLDER_ID };
+        return Response.json(await safeUpdate(drive, config, input));
+      } catch (error) {
+        return Response.json({ status: 'error', message: String(error?.message || error) });
+      }
+    });
+  }
+}
 
 const escape = (value) => String(value).replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 
@@ -108,6 +130,15 @@ const apiHandler = {
     const deps = {
       drive: createDrive((force) => getDriveToken(env, force)),
       config: { knowledgeFolderId: env.KNOWLEDGE_FOLDER_ID, backupFolderId: env.BACKUP_FOLDER_ID },
+      update: async input => {
+        if (typeof input?.file_id !== 'string' || !input.file_id) return { status: 'invalid_request', message: 'file_idが必要です' };
+        // No public endpoint bypasses OAuth; the DO is reached only by this binding.
+        if (!env.KNOWLEDGE_WRITES) return { status: 'error', message: '保存調整用の接続がありません。保存せず停止しました' };
+        const stub = env.KNOWLEDGE_WRITES.get(env.KNOWLEDGE_WRITES.idFromName(input.file_id));
+        const response = await stub.fetch('https://knowledge.internal/update', { method: 'POST', body: JSON.stringify(input) });
+        if (!response.ok) throw new Error(`保存調整エラー：${response.status}`);
+        return response.json();
+      },
     };
     return handleMcp(request, deps);
   },

@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { pruneBackups, readKnowledge, safeUpdate, tokyoStamp } from '../src/knowledge.js';
 import { handleMcp } from '../src/mcp.js';
+import { inspectKnowledge, selectMarkdown } from '../src/markdown.js';
+import { SerialQueue } from '../src/coordinator.js';
+import { createDrive } from '../src/drive.js';
 
 const config = { knowledgeFolderId: 'KNOW', backupFolderId: 'BACK' };
 
@@ -48,12 +51,13 @@ function fakeDrive(initialFiles = {}) {
       calls.push(['download', id]);
       return files.get(id).body;
     },
-    async uploadContent(id, text) {
+    async uploadContent(id, text, props) {
       calls.push(['upload', id]);
       const f = files.get(id);
       f.body = text;
+      if (props) f.appProperties = { ...f.appProperties, ...props };
       touch(f);
-      return { id, modifiedTime: f.modifiedTime };
+      return { id, modifiedTime: f.modifiedTime, version: f.version };
     },
     async setAppProperties(id, props) {
       calls.push(['props', id]);
@@ -159,13 +163,13 @@ test('full mode rejects empty content and files outside the folder', async () =>
   assert.equal(drive.files.get('O').body, 'x');
 });
 
-test('verification failure is reported and not recorded', async () => {
+test('verification failure is reported without claiming success', async () => {
   const { drive, file } = setup();
   drive.download = async (id) => (drive.calls.push(['download', id]), drive.files.get(id).body + (drive.calls.length > 3 ? '!' : ''));
   const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'r1', mode: 'full', content: 'new' });
   assert.equal(out.status, 'verification_failed');
   assert.equal(out.match, false);
-  assert.deepEqual(file.appProperties, {});
+  assert.equal(typeof file.appProperties.kmAfter, 'string');
 });
 
 test('prune keeps newest 20 backups of the same file only', async () => {
@@ -202,7 +206,7 @@ test('MCP handshake, tool list and tool call', async () => {
   assert.equal(res.status, 202);
   res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = (await res.json()).result.tools.map((t) => t.name);
-  assert.deepEqual(names, ['list_shared_knowledge', 'read_shared_knowledge', 'safe_update_shared_knowledge']);
+  assert.deepEqual(names, ['list_shared_knowledge', 'read_shared_knowledge', 'check_shared_knowledge', 'safe_update_shared_knowledge']);
   res = await post({
     jsonrpc: '2.0', id: 3, method: 'tools/call',
     params: { name: 'safe_update_shared_knowledge', arguments: { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'r', mode: 'append', content: 'z' } },
@@ -212,4 +216,103 @@ test('MCP handshake, tool list and tool call', async () => {
   assert.equal(call.structuredContent.status, 'saved');
   res = await handleMcp(new Request('https://x/mcp'), deps);
   assert.equal(res.status, 405);
+});
+
+test('lost upload response recovers without duplicate append or backup', async () => {
+  const { drive, file } = setup('before\n');
+  const upload = drive.uploadContent;
+  const input = { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'lost', mode: 'append', content: 'after\n' };
+  drive.uploadContent = async (...args) => { await upload(...args); throw new Error('response lost'); };
+  await assert.rejects(safeUpdate(drive, config, input), /response lost/);
+  const copies = drive.calls.filter(c => c[0] === 'copy').length;
+  const out = await safeUpdate(drive, config, input);
+  assert.equal(out.status, 'already_applied');
+  assert.equal(file.body, 'before\nafter\n');
+  assert.equal(drive.calls.filter(c => c[0] === 'copy').length, copies);
+});
+
+test('parallel writes through file queue permit one save and reject stale second write', async () => {
+  const { drive, file } = setup();
+  const queue = new SerialQueue();
+  const base = file.modifiedTime;
+  const results = await Promise.all(['one', 'two'].map(request_id => queue.run(() => safeUpdate(drive, config, { file_id: 'T', expected_modified_time: base, request_id, mode: 'append', content: request_id }))));
+  assert.deepEqual(results.map(r => r.status), ['saved', 'conflict']);
+  assert.equal(file.body, '# test\none');
+  assert.equal(drive.calls.filter(c => c[0] === 'copy').length, 1);
+});
+
+test('file queue recovers after a failed operation', async () => {
+  const queue = new SerialQueue();
+  const failed = queue.run(async () => { throw new Error('failed'); });
+  const next = queue.run(async () => 42);
+  await assert.rejects(failed, /failed/);
+  assert.equal(await next, 42);
+});
+
+test('external change during backup is rejected before upload', async () => {
+  const { drive, file } = setup();
+  const base = file.modifiedTime, copy = drive.copy;
+  drive.copy = async (...args) => { const result = await copy(...args); await drive.uploadContent('T', 'external edit'); return result; };
+  const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: base, request_id: 'r', mode: 'full', content: 'mine' });
+  assert.equal(out.status, 'conflict');
+  assert.equal(file.body, 'external edit');
+});
+
+test('partial heading includes subheadings and ignores headings in fences', () => {
+  const body = '# Root\n## A\ntext\n```\n## B\n```\n### Child\nmore\n## B\nother\n';
+  const out = selectMarkdown(body, { section: 'A' });
+  assert.equal(out.complete, false);
+  assert.ok(out.content.includes('### Child'));
+  assert.ok(!out.content.includes('other'));
+  assert.ok(selectMarkdown(body, { section: 'missing' }).error);
+  assert.ok(selectMarkdown(body, { section: 'A', product_ids: ['DEV-001'] }).error);
+});
+
+test('partial product reads retain table headings and reject missing IDs', () => {
+  const body = '# Products\n## Devices\n| ID | Name |\n|---|---|\n| DEV-001 | One |\n| DEV-002 | Two |\n';
+  const out = selectMarkdown(body, { product_ids: ['DEV-002'] });
+  assert.ok(out.content.includes('| ID | Name |'));
+  assert.ok(out.content.includes('Two'));
+  assert.ok(!out.content.includes('One'));
+  assert.ok(selectMarkdown(body, { product_ids: ['DEV-999'] }).error);
+  assert.ok(selectMarkdown(body, { product_ids: ['DEV-002', 'DEV-999'] }).error);
+});
+
+test('read retries an inconsistent snapshot and returns current body and version', async () => {
+  const { drive, file } = setup('old');
+  const download = drive.download;
+  let first = true;
+  drive.download = async id => { const content = await download(id); if (first) { first = false; await drive.uploadContent(id, 'new'); } return content; };
+  const out = await readKnowledge(drive, config, { file_id: 'T' });
+  assert.equal(out.content, 'new');
+  assert.equal(out.modified_time, file.modifiedTime);
+  assert.equal(out.complete, true);
+});
+
+test('checks catch malformed tables, duplicate IDs and broken references', () => {
+  const out = inspectKnowledge([{ name: 'products.md', content: '| ID | Name |\n|---|---|\n| DEV-001 | one | extra |\n| DEV-001 | duplicate |\n' }, { name: 'other.md', content: 'DEV-999\n```\nDEV-888\n```\n' }]);
+  assert.ok(out.issues.some(i => i.code === 'table_columns'));
+  assert.ok(out.issues.some(i => i.code === 'duplicate_id'));
+  assert.ok(out.issues.some(i => i.code === 'missing_id' && i.id === 'DEV-999'));
+  assert.ok(!out.issues.some(i => i.id === 'DEV-888'));
+});
+
+test('save blocks a newly malformed table before any backup', async () => {
+  const { drive, file } = setup('| A | B |\n|---|---|\n| one | two |\n');
+  const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'bad-table', mode: 'append', content: '| x | y | z |\n' });
+  assert.equal(out.status, 'invalid_request');
+  assert.equal(drive.calls.filter(c => c[0] === 'copy').length, 0);
+});
+
+test('multipart upload carries exact UTF-8 content and retry markers in one PATCH', async () => {
+  const requests = [];
+  const drive = createDrive(async () => 'test-token', async (url, init) => { requests.push({ url, init }); return Response.json({ id: 'T', version: '2', modifiedTime: 'now' }); });
+  const body = '# 日本語\n"quote" \\ $& 😀\n';
+  await drive.uploadContent('T', body, { kmReq: 'request-hash' });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].init.method, 'PATCH');
+  assert.ok(requests[0].url.includes('uploadType=multipart'));
+  const wire = new TextDecoder().decode(requests[0].init.body);
+  assert.ok(wire.includes(body));
+  assert.ok(wire.includes('"kmReq":"request-hash"'));
 });

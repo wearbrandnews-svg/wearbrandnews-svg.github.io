@@ -9,6 +9,10 @@
   "minify": true,
   // 実行ログ（Cloudflareダッシュボードの Workers → ai-knowledge-mcp → ログ）。無料枠内
   "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "KNOWLEDGE_WRITES", "class_name": "KnowledgeCoordinator" }]
+  },
+  "migrations": [{ "tag": "knowledge-coordinator-v1", "new_sqlite_classes": ["KnowledgeCoordinator"] }],
   "kv_namespaces": [
     // `npx wrangler kv namespace create OAUTH_KV` で表示された id に置き換える
     { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }

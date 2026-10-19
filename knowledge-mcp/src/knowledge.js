@@ -3,6 +3,8 @@
 //        → 更新前コピー → 本文更新 → 保存後の全文照合 → 依頼記録 → バックアップ20世代整理 → 結果返却
 // Drive の操作は drive オブジェクト（src/drive.js）経由で行い、テストでは偽物に差し替える。
 
+import { inspectMarkdown, inspectKnowledge, selectMarkdown } from './markdown.js';
+
 export const KEEP_GENERATIONS = 20;
 const MODES = ['full', 'append', 'replace_exact'];
 const BACKUP_SUFFIX = /-backup-[0-9]{8}-[0-9]{6}-[0-9]{3}[.]md$/;
@@ -153,9 +155,27 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
     });
   }
 
-  // 6. 更新前コピー → 本文更新 → 保存後の全文照合
+  // Reject newly introduced structural defects without blocking repairs of old ones.
+  const issueKey = issue => JSON.stringify([issue.code, issue.id || '', issue.message]);
+  const oldIssues = new Set(inspectMarkdown(current).issues.map(issueKey));
+  const newIssues = inspectMarkdown(change.text).issues.filter(issue => !oldIssues.has(issueKey(issue)));
+  if (newIssues.length) return result('invalid_request', { file_id, message: `構造の点検で問題：${newIssues.map(i => i.message).join(' / ')}` });
+
+  // 6. Update body and retry markers in ONE Drive multipart request. If the
+  // response or later verification is lost, an identical retry can recover.
   const backup = await drive.copy(file_id, `${meta.name}-backup-${tokyoStamp(now())}.md`, config.backupFolderId);
-  const updated = await drive.uploadContent(file_id, change.text);
+  const lastCheck = await drive.getMeta(file_id, 'id,version,modifiedTime');
+  if (lastCheck.modifiedTime !== meta.modifiedTime || lastCheck.version !== meta.version) {
+    return result('conflict', { file_id, backup_file_id: backup.id, modified_time: lastCheck.modifiedTime, message: 'バックアップ中に本文が更新されました。最新版を取得してください' });
+  }
+  const updated = await drive.uploadContent(file_id, change.text, {
+    [P.request]: requestHash,
+    [P.input]: inputHash,
+    [P.mode]: mode,
+    [P.base]: meta.modifiedTime,
+    [P.after]: await sha256(change.text),
+    [P.backup]: backup.id,
+  });
   const saved = await drive.download(file_id);
   if (saved !== change.text) {
     return result('verification_failed', {
@@ -168,15 +188,10 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
     });
   }
 
-  // 7. 依頼記録（全文照合の後に書く）
-  const recorded = await drive.setAppProperties(file_id, {
-    [P.request]: requestHash,
-    [P.input]: inputHash,
-    [P.mode]: mode,
-    [P.base]: meta.modifiedTime,
-    [P.after]: await sha256(saved),
-    [P.backup]: backup.id,
-  });
+  const verifiedMeta = await drive.getMeta(file_id, META_FIELDS);
+  if (verifiedMeta.version !== updated.version || verifiedMeta.appProperties?.[P.request] !== requestHash || verifiedMeta.appProperties?.[P.input] !== inputHash) {
+    return result('verification_failed', { file_id, backup_file_id: backup.id, modified_time: verifiedMeta.modifiedTime, message: '保存後に版または依頼記録が変わりました。本文を再確認してください' });
+  }
 
   // 8. バックアップ20世代整理（失敗しても本文は保存済み）
   let cleanupError = null;
@@ -191,7 +206,7 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
     match: true,
     length: saved.length,
     backup_file_id: backup.id,
-    modified_time: recorded.modifiedTime,
+    modified_time: verifiedMeta.modifiedTime,
     message: cleanupError,
   });
 }
@@ -221,17 +236,27 @@ export async function pruneBackups(drive, config, name) {
 export async function readKnowledge(drive, config, input) {
   const fileId = input?.file_id;
   if (typeof fileId !== 'string' || !fileId) return { status: 'invalid_request', message: 'file_idが必要です' };
-  const meta = await drive.getMeta(fileId, META_FIELDS);
-  const targetError = checkTarget(meta, config);
-  if (targetError) return { status: 'invalid_request', file_id: fileId, message: targetError };
-  const content = await drive.download(fileId);
+  let meta, content, stable = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    meta = await drive.getMeta(fileId, META_FIELDS);
+    const targetError = checkTarget(meta, config);
+    if (targetError) return { status: 'invalid_request', file_id: fileId, message: targetError };
+    content = await drive.download(fileId);
+    const after = await drive.getMeta(fileId, META_FIELDS);
+    if (!checkTarget(after, config) && after.version === meta.version && after.modifiedTime === meta.modifiedTime) { stable = true; break; }
+  }
+  if (!stable) return { status: 'conflict', file_id: fileId, message: '読み取り中に変更が続いています。少し後に取得してください' };
+  const selected = selectMarkdown(content, input);
+  if (selected.error) return { status: 'invalid_request', file_id: fileId, message: selected.error };
   return {
     status: 'ok',
     file_id: fileId,
     name: meta.name,
     modified_time: meta.modifiedTime,
-    length: content.length,
-    content,
+    length: selected.content.length,
+    total_length: content.length,
+    complete: selected.complete,
+    content: selected.content,
   };
 }
 
@@ -241,11 +266,28 @@ export async function listKnowledge(drive, config) {
     'trashed = false',
     "mimeType = 'text/markdown'",
   ].join(' and ');
-  const listed = await drive.list(q, 'name');
+  const files = [];
+  let pageToken;
+  do {
+    const listed = await drive.list(q, 'name', pageToken);
+    files.push(...(listed.files || []));
+    pageToken = listed.nextPageToken;
+  } while (pageToken);
   return {
     status: 'ok',
-    files: (listed.files || [])
+    files: files
       .filter((file) => file.name.endsWith('.md'))
       .map((file) => ({ file_id: file.id, name: file.name, modified_time: file.modifiedTime })),
   };
+}
+
+export async function checkKnowledge(drive, config) {
+  const listed = await listKnowledge(drive, config);
+  const files = [];
+  for (const file of listed.files.filter(file => file.name !== 'knowledge-update-test.md')) {
+    const read = await readKnowledge(drive, config, { file_id: file.file_id });
+    if (read.status !== 'ok') return read;
+    files.push(read);
+  }
+  return { status: 'ok', ...inspectKnowledge(files), semantic_verification: false };
 }
