@@ -1,0 +1,126 @@
+// MCP（Streamable HTTP、ステートレス・JSON応答）の最小実装。
+import { listKnowledge, readKnowledge, safeUpdate } from './knowledge.js';
+
+const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const SERVER_INFO = { name: 'ai-knowledge', version: '1.0.0' };
+
+const UPDATE_DESCRIPTION = `AI-Knowledgeフォルダー直下の既存Markdown（共通知識DB）を安全に更新する（Safe Update Shared Knowledge）。
+保存前にread_shared_knowledgeで最新本文とmodified_timeを取得し、そのmodified_timeをexpected_modified_timeにそのまま渡す。request_idは依頼ごとにAIが生成する一意の文字列。
+mode=full：contentは更新後の全文。mode=append：contentを末尾にそのまま追加（区切りの改行も含める）。mode=replace_exact：old_text（本文にちょうど1回ある完全一致文字列）をcontentに置換。
+サーバーが更新前コピー（Backups）、本文更新、保存後の全文照合、バックアップ20世代整理を行う。
+成功判定：statusがsavedまたはalready_appliedで、matchが真偽値true、file_idが対象と一致する場合だけ。conflictは書き込まずに停止したもの（最新版を再取得して統合し、新しいrequest_idで保存し直す）。invalid_request・verification_failed・errorは完了ではない。タイムアウト・結果不明のときは本文を読み直してから判断し、同じ追記を新しいrequest_idで無条件に再送しない。`;
+
+const TOOLS = [
+  {
+    name: 'list_shared_knowledge',
+    description: 'AI-Knowledgeフォルダー直下のMarkdownファイル一覧（file_id・名前・modified_time）を返す。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'read_shared_knowledge',
+    description:
+      'AI-Knowledgeフォルダー直下のMarkdownを、エスケープなしの生の本文とmodified_timeで返す。保存（safe_update_shared_knowledge）の直前に使う。',
+    inputSchema: {
+      type: 'object',
+      properties: { file_id: { type: 'string', description: '対象MDのDriveファイルID' } },
+      required: ['file_id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'safe_update_shared_knowledge',
+    description: UPDATE_DESCRIPTION,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_id: { type: 'string', description: '対象MDのDriveファイルID' },
+        expected_modified_time: { type: 'string', description: '直前に取得したmodified_time（そのまま）' },
+        request_id: { type: 'string', description: '依頼ごとの一意なID。同じ依頼の再送では全入力を変えない' },
+        mode: { type: 'string', enum: ['full', 'append', 'replace_exact'] },
+        content: { type: 'string', description: 'full：全文／append：追加文字列／replace_exact：置換後の文字列' },
+        old_text: { type: 'string', description: 'replace_exactのときだけ。本文にちょうど1回ある完全一致文字列' },
+      },
+      required: ['file_id', 'expected_modified_time', 'request_id', 'mode', 'content'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  },
+];
+
+const rpcResult = (id, value) => ({ jsonrpc: '2.0', id, result: value });
+const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
+
+async function callTool(name, args, deps) {
+  if (name === 'list_shared_knowledge') return listKnowledge(deps.drive, deps.config);
+  if (name === 'read_shared_knowledge') return readKnowledge(deps.drive, deps.config, args);
+  if (name === 'safe_update_shared_knowledge') return safeUpdate(deps.drive, deps.config, args);
+  return null;
+}
+
+async function handleMessage(message, deps) {
+  const { id, method, params } = message || {};
+  const isNotification = id === undefined || id === null;
+  if (message?.jsonrpc !== '2.0' || typeof method !== 'string') {
+    return isNotification ? null : rpcError(id, -32600, 'Invalid Request');
+  }
+  if (isNotification) return null;
+
+  switch (method) {
+    case 'initialize': {
+      const requested = params?.protocolVersion;
+      return rpcResult(id, {
+        protocolVersion: SUPPORTED_VERSIONS.includes(requested) ? requested : SUPPORTED_VERSIONS[1],
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: SERVER_INFO,
+        instructions: '共通知識DB（Google Drive AI-Knowledge）の読み取りと安全な保存。保存ルールの正本はAI-Rules.md。',
+      });
+    }
+    case 'ping':
+      return rpcResult(id, {});
+    case 'tools/list':
+      return rpcResult(id, { tools: TOOLS });
+    case 'tools/call': {
+      try {
+        const output = await callTool(params?.name, params?.arguments || {}, deps);
+        if (!output) return rpcError(id, -32602, `Unknown tool: ${params?.name}`);
+        const failed = !['ok', 'saved', 'already_applied'].includes(output.status);
+        return rpcResult(id, {
+          content: [{ type: 'text', text: JSON.stringify(output) }],
+          structuredContent: output,
+          isError: failed,
+        });
+      } catch (error) {
+        const output = { status: 'error', message: String(error?.message || error) };
+        return rpcResult(id, {
+          content: [{ type: 'text', text: JSON.stringify(output) }],
+          structuredContent: output,
+          isError: true,
+        });
+      }
+    }
+    default:
+      return rpcError(id, -32601, `Method not found: ${method}`);
+  }
+}
+
+export async function handleMcp(request, deps) {
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'POST' } });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json(rpcError(null, -32700, 'Parse error'), { status: 400 });
+  }
+  const messages = Array.isArray(body) ? body : [body];
+  const responses = [];
+  for (const message of messages) {
+    const response = await handleMessage(message, deps);
+    if (response) responses.push(response);
+  }
+  if (responses.length === 0) return new Response(null, { status: 202 });
+  return Response.json(Array.isArray(body) ? responses : responses[0]);
+}

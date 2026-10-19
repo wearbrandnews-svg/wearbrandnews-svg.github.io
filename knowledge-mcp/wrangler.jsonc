@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-knowledge-mcp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "kv_namespaces": [
+    // `npx wrangler kv namespace create OAUTH_KV` で表示された id に置き換える
+    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
+  ]
+  // 秘密情報は `npx wrangler secret put <名前>` で登録する（README参照）：
+  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAIL, KNOWLEDGE_FOLDER_ID, BACKUP_FOLDER_ID
+}
