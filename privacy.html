@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>プライバシーポリシー — 個人用Drive同期</title>
+  <title>プライバシーポリシー — 個人用Drive同期・AI Knowledge</title>
 </head>
 <body>
   <main>
     <h1>プライバシーポリシー</h1>
-    <p>最終更新：2026年10月17日</p>
+    <p>最終更新：2026年10月19日</p>
 
     <h2>対象と目的</h2>
     <p>
       本ポリシーは、サイト管理者本人がDrive Bridgeを使って、
-      自身のGoogle DriveとObsidianを同期する個人用設定に適用されます。
-      一般向けサービスではありません。
+      自身のGoogle DriveとObsidianを同期する個人用設定、および
+      下記「AI Knowledge MCPサーバー」に適用されます。
+      いずれも一般向けサービスではありません。
     </p>
 
     <h2>アクセスする情報と用途</h2>
@@ -35,6 +36,23 @@
       広告目的に使用したりすることはありません。
       同じDrive内のファイルを別のAIサービスに接続した場合、
       その処理には当該サービスの規約とプライバシーポリシーも適用されます。
+    </p>
+
+    <h2>AI Knowledge MCPサーバー</h2>
+    <p>
+      AI Knowledge MCPサーバー（Cloudflare Workersで稼働）は、サイト管理者本人が
+      Claude・ChatGPT・CodexなどのAIから、自身のGoogle Drive内の指定フォルダーにある
+      Markdownファイルを読み取り・更新するための個人用の仕組みです。
+      接続できるのは、設定で許可した管理者本人のGoogleアカウントだけです。
+    </p>
+    <p>
+      Google OAuthで許可された権限を使い、指定フォルダー内のファイル名・更新日時・本文を
+      取得し、更新時は更新前のコピーをバックアップ用フォルダーに作成します。
+      要求する権限はGoogle Drive全体へのアクセスを含みますが、
+      読み取り・更新の対象は指定フォルダー直下のMarkdownファイルに限定しています。
+      Googleの認証情報（リフレッシュトークン）とAIとの接続用トークンは、
+      Cloudflare Workersのストレージに保存されます。
+      ファイル本文はサーバーに保存せず、処理のたびにGoogle Driveから取得します。
     </p>
 
     <h2>接続解除と削除</h2>
