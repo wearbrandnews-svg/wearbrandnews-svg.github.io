@@ -2,12 +2,12 @@
 import { listKnowledge, readKnowledge, safeUpdate, checkKnowledge, searchKnowledge } from './knowledge.js';
 
 const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'ai-knowledge', version: '1.4.0' };
+const SERVER_INFO = { name: 'ai-knowledge', version: '1.3.0' };
 
 const UPDATE_DESCRIPTION = `AI-Knowledgeフォルダー直下の既存Markdown（共通知識DB）を安全に更新する（Safe Update Shared Knowledge）。
 保存前にread_shared_knowledgeで最新本文とmodified_timeを取得し、そのmodified_timeをexpected_modified_timeにそのまま渡す。request_idは依頼ごとにAIが生成する一意の文字列。
 mode=full：contentは更新後の全文。mode=append：contentを末尾にそのまま追加（区切りの改行も含める）。mode=replace_exact：old_text（本文にちょうど1回ある完全一致文字列）をcontentに置換。
-サーバーが同一ファイルの保存を順番に処理し、更新前コピー（Backups）、本文と再送判定情報の一括更新、保存後の全文照合、バックアップ20世代整理を行う。新しく生じる表の崩れ・商品ID重複・秘密情報らしい文字列（APIキー・トークン・秘密鍵・認証用URL）は保存前に拒否する。Obsidian等の直接編集はこの順番制御の対象外。
+サーバーが同一ファイルの保存を順番に処理し、更新前コピー（Backups）、本文と再送判定情報の一括更新、保存後の全文照合、バックアップ20世代整理を行う。新しく生じる表の崩れ・商品ID重複は保存前に拒否する。Obsidian等の直接編集はこの順番制御の対象外。
 成功判定：statusがsavedまたはalready_appliedで、matchが真偽値true、file_idが対象と一致する場合だけ。conflictは書き込まずに停止したもの（最新版を再取得して統合し、新しいrequest_idで保存し直す）。invalid_request・verification_failed・errorは完了ではない。タイムアウト・結果不明のときは本文を読み直してから判断し、同じ追記を新しいrequest_idで無条件に再送しない。`;
 
 const TOOLS = [
