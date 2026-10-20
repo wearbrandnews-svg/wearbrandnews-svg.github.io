@@ -5,6 +5,7 @@
 
 import { inspectMarkdown, inspectKnowledge, selectMarkdown } from './markdown.js';
 import { searchMarkdown, routeFiles } from './search.js';
+import { newSecretKinds, findSecrets } from './secrets.js';
 
 export const KEEP_GENERATIONS = 20;
 const MODES = ['full', 'append', 'replace_exact'];
@@ -161,6 +162,8 @@ export async function safeUpdate(drive, config, input, now = () => new Date()) {
   const oldIssues = new Set(inspectMarkdown(current).issues.map(issueKey));
   const newIssues = inspectMarkdown(change.text).issues.filter(issue => !oldIssues.has(issueKey(issue)));
   if (newIssues.length) return result('invalid_request', { file_id, message: `構造の点検で問題：${newIssues.map(i => i.message).join(' / ')}` });
+  const secrets = newSecretKinds(current, change.text);
+  if (secrets.length) return result('invalid_request', { file_id, message: `秘密情報らしい文字列があるため保存しません（${secrets.join('、')}）。値を除いて保存し直してください` });
 
   // 6. Update body and retry markers in ONE Drive multipart request. If the
   // response or later verification is lost, an identical retry can recover.
@@ -307,7 +310,14 @@ export async function checkKnowledge(drive, config) {
     if (read.status !== 'ok') return read;
     files.push(read);
   }
-  return { status: 'ok', ...inspectKnowledge(files), semantic_verification: false };
+  const report = inspectKnowledge(files);
+  // 既存本文に残った秘密情報らしい文字列も点検で知らせる（値は返さない）
+  for (const file of files) {
+    for (const kind of new Set(findSecrets(file.content).map(s => s.kind))) {
+      report.issues.push({ code: 'secret', file: file.name, message: `秘密情報らしい文字列（${kind}）があります` });
+    }
+  }
+  return { status: 'ok', ...report, semantic_verification: false };
 }
 
 export async function searchKnowledge(drive, config, input) {

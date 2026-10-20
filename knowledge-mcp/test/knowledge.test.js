@@ -407,3 +407,22 @@ test('post-upload external edit is preserved and not reported as a verified save
   assert.equal(out.status, 'verification_failed');
   assert.equal(file.body, 'external edit');
 });
+
+test('save rejects newly introduced secrets without echoing them, but allows editing around old ones', async () => {
+  const key = 'sk-ant-' + 'a'.repeat(40);
+  const { drive, file } = setup('# test\n');
+  const out = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'secret', mode: 'append', content: `- key ${key}\n` });
+  assert.equal(out.status, 'invalid_request');
+  assert.match(out.message, /Anthropic APIキー/);
+  assert.ok(!out.message.includes(key));
+  assert.equal(drive.calls.filter(c => c[0] === 'copy').length, 0);
+  for (const content of ['- URL https://example.com/cb?access_token=abcdefgh12345\n', '- Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345\n', '-----BEGIN PRIVATE KEY-----\n']) {
+    const r = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: content, mode: 'append', content });
+    assert.equal(r.status, 'invalid_request', content);
+  }
+  const ok = await safeUpdate(drive, config, { file_id: 'T', expected_modified_time: file.modifiedTime, request_id: 'plain', mode: 'append', content: '- KV：OAUTH_KV（872607080dc64db28976dd91cbcaec3a）、https://drive.google.com/file/d/1GW0NV_PPllmP5BHJgIWUh2xQB3R7TZ_9/view?usp=drivesdk\n' });
+  assert.equal(ok.status, 'saved');
+  const legacy = setup(`# old\n- ${key}\n`);
+  const fix = await safeUpdate(legacy.drive, config, { file_id: 'T', expected_modified_time: legacy.file.modifiedTime, request_id: 'legacy', mode: 'append', content: '- 追記\n' });
+  assert.equal(fix.status, 'saved');
+});
